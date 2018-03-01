@@ -1,0 +1,135 @@
+#password-less SSH Setup
+
+LOGFILE=./allnodesprep.log
+hostsfile=./all.hosts
+dbcmdsfile=./pre-req.sql
+dbcmds1file=~/scripts/pre-req-1.sql
+ambariserverip=`hostname -i`
+ambari-server-host=`hostname -f`
+blueprintfile=XXX-XX.json
+hdprepofile=hdprepo.json
+hdputilfile=hdputil.json
+hostmappingfile=hostmapping.json
+
+printHeading()
+{
+echo -e "\n${1}\n________________________________\n" >> $LOGFILE 2>&1
+}
+
+function getrepos {
+
+printHeading "getrepos"
+
+for host in `cat $hostsfile` ; 
+do
+printHeading "Verifying on Host--$i";
+ssh -q $host 
+yum-config-manager --enable rhui-REGION-rhel-server-optional
+yum install -y libtirpc-devel wget ;
+wget https://s3.amazonaws.com/XXXXX/hadoop/repo/ambari.repo -O /etc/yum.repos.d/ambari.repo;
+wget https://s3.amazonaws.com/XXXXXXXXXX/hadoop/repo/HDP-2.6.1.49-2.repo -O /etc/yum.repos.d/HDP-2.6.1.49-2.repo;
+wget https://s3.amazonaws.com/XXXXXXXXXX/hadoop/repo/HDP-UTILS.repo -O /etc/yum.repos.d/HDP-UTILS.repo;
+wget https://s3.amazonaws.com/XXXXXXXXXX/hadoop/repo/HDP.repo -O /etc/yum.repos.d/HDP.repo;
+yum clean all;
+yum repolist;
+done
+
+}
+
+function allnodesprep {
+
+printHeading "All Nodes Prep"
+
+export WCOLL=$hostsfile
+echo "Verifying on Host--$i";
+pdsh 'hostname -f;hostname -i'
+echo "Disabling THP"
+pdsh 'echo " " >> /etc/rc.local'
+pdsh 'echo "if test -f /sys/kernel/mm/redhat_transparent_hugepage/enabled; then " >> /etc/rc.local'
+pdsh 'echo "  echo never > /sys/kernel/mm/transparent_hugepage/enabled" >> /etc/rc.local'
+pdsh 'echo "fi"  >> /etc/rc.local'
+pdsh 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'
+pdsh 'echo never > /sys/kernel/mm/transparent_hugepage/defrag '
+echo "SELINUX"
+pdsh 'setenforce 0 && sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/selinux/config '
+pdsh 'sysctl vm.swappiness=1'
+pdsh 'echo "*                soft    nofile          65536" >> /etc/security/limits.conf '
+pdsh 'echo "*                hard    nofile          65536" >> /etc/security/limits.conf '
+echo "Download JAVA Package and set JAVA_HOME"
+pdsh 'cd /tmp;wget http://XXXXXXXXXXx/AllNodes/jdk-8u151-linux-x64.rpm'
+pdsh 'rpm -ivh /tmp/jdk-8u151-linux-x64.rpm'
+pdsh 'alternatives --install /usr/bin/java java /usr/java/jdk1.8.0_151/bin/java 2'
+pdsh 'alternatives --set java /usr/java/jdk1.8.0_151/bin/java'
+echo "Verifying hostname FQDN and Java Version"
+pdsh 'hostname -f;java -version'
+
+}
+
+function ambariserersetup {
+
+ambari-server setup --jdbc-db=postgres --jdbc-driver=/usr/share/java/postgresql-jdbc.jar
+--init-script-file=INIT_SCRIPT_FILE
+                        File with setup script
+--verbose
+--silent
+--database=postgres
+--databasehost
+--databaseport=5432
+--java-home=
+--databasename=ambari
+--postgresschema=ambari
+--databaseusername=XXXXXX
+ --databasepassword=XXXXx
+--jdbc-db=postgres
+
+}
+
+function ambariagentsetup {
+
+export WCOLL=$hostsfile
+pdsh 'yum clean all;yum repolist;yum install -y ambari-agent'
+echo "set ambari-server"
+setambariserver =  "sed -i s/hostname=localhost/hostname="$ambari-server-host"/g' /etc/ambari-agent/conf/ambari-agent.ini"
+pdsh "$setambariserver"
+echo "setsmartsense"
+pdsh 'sed -i s/verify=platform_default/verify=disable/g /etc/python/cert-verification.cfg'
+pdsh 'ambari-agent restart'
+
+}
+
+function mgmtnodeprep {
+
+printHeading "ambari-install"
+yum install -y ambari-server;
+yum install -y pdsh;
+
+printHeading "database-pre-req"
+yum install -y postgresql-jdbc*;
+ls -l /usr/share/java/postgresql-jdbc.jar;
+chmod 644 /usr/share/java/postgresql-jdbc.jar;
+
+psql -h XXXXXXXXXX -U v_dbadmin -Wv_dbadmin -d postgres -f $dbcmdsfile
+psql -h XXXXXXXXXX -U ambari -W bigdata -d ambari -f $dbcmds1file
+psql -h XXXXXXXXXX -U ambari -W bigdata -d ambari -f /var/lib/ambari-server/resources/Ambari-DDL-Postgres-CREATE.sql
+
+
+}
+
+function clusterbuild {
+
+curl -H "X-Requested-By: ambari" -X POST -u admin:admin http://${ambariserverip}:8080/api/v1/blueprints/${clustername} -d @${blueprintfile}
+curl -H "X-Requested-By: ambari" -X PUT -u admin:admin http://${ambariserverip}:8080/api/v1/stacks/HDP/versions/2.6/operating_systems/redhat7/repositories/HDP-2.6 -d @${hdprepofile}
+curl -H "X-Requested-By: ambari" -X PUT -u admin:admin http://${ambariserverip}:8080/api/v1/stacks/HDP/versions/2.6/operating_systems/redhat7/repositories/HDP-UTILS-1.1.0.21 -d @{hdputilfile}
+curl -H "X-Requested-By: ambari" -X POST -u admin:admin http://${ambariserverip}:8080/api/v1/clusters/${clustername} -d @{hostmappingfile}
+
+}
+
+
+#calling functions
+getrepos
+allnodesprep
+mgmtnodeprep
+ambariserversetup
+ambariagentsetup
+clusterbuild
+
